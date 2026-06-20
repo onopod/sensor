@@ -1,4 +1,5 @@
 import cv2
+import ctypes
 import time
 import random
 import shutil
@@ -15,6 +16,13 @@ CHARACTER_IMAGE_FILE = "character.png"
 MOVIE_DIR = Path("movies")
 MOVIE_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv"]
 WELCOME_MOVIE_FILE = "0620 (1).mp4"
+LOCAL_FFPLAY_PATHS = [
+    Path("ffplay.exe"),
+    Path("ffmpeg") / "bin" / "ffplay.exe",
+]
+MOVIE_DISPLAY_INDEX = 1
+MOVIE_SCREEN_MARGIN = 40
+MOVIE_FULLSCREEN = True
 
 CAMERA_WIDTH = 320
 CAMERA_HEIGHT = 240
@@ -231,6 +239,116 @@ def wait_seconds_with_window(seconds):
         time.sleep(0.03)
 
 
+def get_display_areas():
+    try:
+        monitors = []
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", ctypes.c_ulong),
+            ]
+
+        monitor_enum_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.POINTER(RECT),
+            ctypes.c_double,
+        )
+
+        def callback(handle, device_context, rect_pointer, data):
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+
+            if ctypes.windll.user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+                work = info.rcWork
+                monitors.append({
+                    "left": work.left,
+                    "top": work.top,
+                    "width": work.right - work.left,
+                    "height": work.bottom - work.top,
+                    "primary": bool(info.dwFlags & 1),
+                })
+
+            return 1
+
+        ctypes.windll.user32.EnumDisplayMonitors(
+            None,
+            None,
+            monitor_enum_proc(callback),
+            0,
+        )
+
+        monitors.sort(key=lambda m: (not m["primary"], m["left"], m["top"]))
+
+        if monitors:
+            return monitors
+
+    except Exception as e:
+        print(f"ディスプレイ情報を取得できません: {e}")
+
+    return [{
+        "left": 0,
+        "top": 0,
+        "width": root.winfo_screenwidth(),
+        "height": root.winfo_screenheight(),
+        "primary": True,
+    }]
+
+
+def get_movie_display_area():
+    displays = get_display_areas()
+    display_index = MOVIE_DISPLAY_INDEX
+
+    if display_index >= len(displays):
+        display_index = 0
+
+    return displays[display_index]
+
+
+def get_video_size(movie_path):
+    video = cv2.VideoCapture(str(movie_path))
+
+    if not video.isOpened():
+        return 1280, 720
+
+    width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    video.release()
+
+    if width <= 0 or height <= 0:
+        return 1280, 720
+
+    return width, height
+
+
+def get_movie_window_geometry(movie_path):
+    display = get_movie_display_area()
+    video_width, video_height = get_video_size(movie_path)
+
+    max_width = max(320, display["width"] - MOVIE_SCREEN_MARGIN * 2)
+    max_height = max(240, display["height"] - MOVIE_SCREEN_MARGIN * 2)
+    scale = min(max_width / video_width, max_height / video_height, 1)
+
+    window_width = max(1, int(video_width * scale))
+    window_height = max(1, int(video_height * scale))
+    window_left = display["left"] + (display["width"] - window_width) // 2
+    window_top = display["top"] + (display["height"] - window_height) // 2
+
+    return window_left, window_top, window_width, window_height
+
+
 def play_movie_with_cv2(movie_path):
     video = cv2.VideoCapture(str(movie_path))
 
@@ -238,8 +356,17 @@ def play_movie_with_cv2(movie_path):
         print(f"動画を開けません: {movie_path}")
         return
 
+    window_left, window_top, window_width, window_height = get_movie_window_geometry(movie_path)
     fps = video.get(cv2.CAP_PROP_FPS)
     delay_ms = int(1000 / fps) if fps and fps > 0 else 33
+    window_name = "Movie"
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, window_width, window_height)
+    cv2.moveWindow(window_name, window_left, window_top)
+
+    if MOVIE_FULLSCREEN:
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     while True:
         ret, frame = video.read()
@@ -247,38 +374,64 @@ def play_movie_with_cv2(movie_path):
         if not ret:
             break
 
-        cv2.imshow("Movie", frame)
+        cv2.imshow(window_name, frame)
         root.update()
 
         if cv2.waitKey(delay_ms) & 0xFF == ord("q"):
             break
 
     video.release()
-    cv2.destroyWindow("Movie")
+    cv2.destroyWindow(window_name)
 
 
 def play_movie(movie_path):
     print(f"動画再生: {movie_path.name}")
 
-    ffplay_path = shutil.which("ffplay")
+    ffplay_path = find_ffplay()
+    window_left, window_top, window_width, window_height = get_movie_window_geometry(movie_path)
 
     if ffplay_path is None:
         print("ffplayが見つからないため、映像のみ再生します")
+        print("音声付きで再生するには、ffplay.exeをPATHに追加するか、このフォルダに置いてください")
         play_movie_with_cv2(movie_path)
         return
 
-    subprocess.run(
-        [
-            ffplay_path,
-            "-autoexit",
-            "-loglevel",
-            "quiet",
-            "-window_title",
-            movie_path.name,
-            str(movie_path),
-        ],
-        check=False,
-    )
+    command = [
+        str(ffplay_path),
+        "-autoexit",
+        "-loglevel",
+        "quiet",
+        "-window_title",
+        movie_path.name,
+        "-x",
+        str(window_width),
+        "-y",
+        str(window_height),
+        "-left",
+        str(window_left),
+        "-top",
+        str(window_top),
+    ]
+
+    if MOVIE_FULLSCREEN:
+        command.append("-fs")
+
+    command.append(str(movie_path))
+
+    subprocess.run(command, check=False)
+
+
+def find_ffplay():
+    for path in LOCAL_FFPLAY_PATHS:
+        if path.exists():
+            return path
+
+    ffplay_path = shutil.which("ffplay")
+
+    if ffplay_path is None:
+        return None
+
+    return Path(ffplay_path)
 
 
 def apply_camera_settings(camera):
