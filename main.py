@@ -17,9 +17,12 @@ VOICE_EXTENSIONS = [".mp3", ".wav", ".ogg"]
 
 WELCOME_KEYWORD = "いらっしゃいませ"
 
+AUDIO_VOLUME_MULTIPLIER = 2.0
+
 CAMERA_WIDTH = 320
 CAMERA_HEIGHT = 240
 CAMERA_FPS = 15
+CAMERA_INDEXES_TO_TRY = [1, 2, 3, 4, 5, 0]
 
 MIN_AREA = 800
 
@@ -55,7 +58,7 @@ TRANSPARENT_COLOR = "#ff00ff"
 # 音声初期化
 # =====================
 pygame.mixer.init()
-pygame.mixer.set_num_channels(8)
+pygame.mixer.set_num_channels(16)
 
 bell_sound = pygame.mixer.Sound(BELL_FILE)
 
@@ -226,15 +229,62 @@ def wait_seconds_with_window(seconds):
         time.sleep(0.03)
 
 
+def play_sound_with_volume(sound):
+    """
+    pygameの音量上限を超える分は、同じ音を重ねて再生する
+    """
+    full_layers = max(1, int(AUDIO_VOLUME_MULTIPLIER))
+    partial_volume = AUDIO_VOLUME_MULTIPLIER - full_layers
+
+    for _ in range(full_layers):
+        sound.play()
+
+    if partial_volume > 0:
+        channel = sound.play()
+        if channel is not None:
+            channel.set_volume(partial_volume)
+
+
+def apply_camera_settings(camera):
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    camera.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+
+def open_preferred_camera():
+    """
+    内蔵カメラになりやすい0番を後回しにして、USBカメラを優先する
+    """
+    for camera_index in CAMERA_INDEXES_TO_TRY:
+        camera = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        apply_camera_settings(camera)
+
+        if not camera.isOpened():
+            camera.release()
+            continue
+
+        ret, _ = camera.read()
+
+        if ret:
+            print(f"Camera index: {camera_index}")
+            return camera
+
+        camera.release()
+
+    return None
+
+
 # =====================
 # カメラ初期化
 # =====================
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+cap = open_preferred_camera()
 
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
-cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+if cap is None:
+    print("使用できるカメラが見つかりません")
+    root.destroy()
+    pygame.mixer.quit()
+    raise SystemExit(1)
 
 actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
 actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
@@ -265,8 +315,8 @@ def play_bell_and_voice(sound, label):
     """
     print(f"ベル + 音声を同時再生: {label}")
 
-    bell_sound.play()
-    sound.play()
+    play_sound_with_volume(bell_sound)
+    play_sound_with_volume(sound)
 
 
 def play_bell_and_random_voice():
@@ -275,7 +325,7 @@ def play_bell_and_random_voice():
     """
     if len(voice_sounds) == 0:
         print("ランダム音声がないため、ベルのみ再生します")
-        bell_sound.play()
+        play_sound_with_volume(bell_sound)
         return
 
     voice_name, voice_sound = random.choice(voice_sounds)
@@ -308,7 +358,7 @@ def play_sequence():
             play_bell_and_voice(welcome_sound, welcome_file_name)
         else:
             print("固定音声がないため、ベルのみ再生します")
-            bell_sound.play()
+            play_sound_with_volume(bell_sound)
 
         wait_seconds_with_window(3)
 
