@@ -1,7 +1,8 @@
 import cv2
 import time
-import pygame
 import random
+import shutil
+import subprocess
 import tkinter as tk
 from pathlib import Path
 from PIL import Image, ImageTk
@@ -9,20 +10,16 @@ from PIL import Image, ImageTk
 # =====================
 # 設定
 # =====================
-BELL_FILE = "bell.mp3"
 CHARACTER_IMAGE_FILE = "character.png"
 
-VOICE_DIR = Path("voices")
-VOICE_EXTENSIONS = [".mp3", ".wav", ".ogg"]
-
-WELCOME_KEYWORD = "いらっしゃいませ"
-
-AUDIO_VOLUME_MULTIPLIER = 2.0
+MOVIE_DIR = Path("movies")
+MOVIE_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv"]
+WELCOME_MOVIE_FILE = "0620 (1).mp4"
 
 CAMERA_WIDTH = 320
 CAMERA_HEIGHT = 240
 CAMERA_FPS = 15
-CAMERA_INDEXES_TO_TRY = [1, 2, 3, 4, 5, 0]
+CAMERA_INDEXES_TO_TRY = [1, 2, 3, 4, 0]
 
 MIN_AREA = 800
 
@@ -55,44 +52,27 @@ CHARACTER_Y = None
 TRANSPARENT_COLOR = "#ff00ff"
 
 # =====================
-# 音声初期化
+# 動画初期化
 # =====================
-pygame.mixer.init()
-pygame.mixer.set_num_channels(16)
-
-bell_sound = pygame.mixer.Sound(BELL_FILE)
-
-voice_files = [
-    p for p in VOICE_DIR.iterdir()
-    if p.is_file() and p.suffix.lower() in VOICE_EXTENSIONS
+movie_files = [
+    p for p in MOVIE_DIR.iterdir()
+    if p.is_file() and p.suffix.lower() in MOVIE_EXTENSIONS
 ]
 
-voice_sounds = []
-welcome_sound = None
-welcome_file_name = None
+welcome_movie = MOVIE_DIR / WELCOME_MOVIE_FILE
+random_movie_files = [
+    p for p in movie_files
+    if p.name != WELCOME_MOVIE_FILE
+]
 
-for p in voice_files:
-    try:
-        sound = pygame.mixer.Sound(str(p))
+if not welcome_movie.exists():
+    print(f"固定動画が見つかりません: {welcome_movie}")
 
-        if WELCOME_KEYWORD in p.name and welcome_sound is None:
-            welcome_sound = sound
-            welcome_file_name = p.name
-        else:
-            voice_sounds.append((p.name, sound))
+if len(random_movie_files) == 0:
+    print("ランダム再生用の動画ファイルがありません")
 
-    except Exception as e:
-        print(f"音声読み込み失敗: {p.name} / {e}")
-
-if welcome_sound is None:
-    print("固定音声『いらっしゃいませ』が見つかりません")
-    print("ファイル名に『いらっしゃいませ』を含めてください")
-
-if len(voice_sounds) == 0:
-    print("ランダム再生用の音声ファイルがありません")
-
-print(f"固定音声: {welcome_file_name}")
-print(f"ランダム音声数: {len(voice_sounds)}")
+print(f"固定動画: {welcome_movie.name if welcome_movie.exists() else None}")
+print(f"ランダム動画数: {len(random_movie_files)}")
 
 # =====================
 # キャラ表示ウィンドウ初期化
@@ -111,6 +91,28 @@ character_window.attributes("-topmost", True)
 
 # 背景透過
 character_window.configure(bg=TRANSPARENT_COLOR)
+
+def play_sequence():
+    """
+    検知時に、固定動画を1本、ランダム動画を2本再生する
+    """
+    if welcome_movie.exists():
+        play_movie(welcome_movie)
+    else:
+        print("固定動画がないため、1本目をスキップします")
+
+    if len(random_movie_files) == 0:
+        print("ランダム動画がないため、追加再生をスキップします")
+        return
+
+    selected_movies = random.sample(
+        random_movie_files,
+        k=min(2, len(random_movie_files)),
+    )
+
+    for movie_path in selected_movies:
+        play_movie(movie_path)
+
 
 try:
     character_window.attributes("-transparentcolor", TRANSPARENT_COLOR)
@@ -229,20 +231,54 @@ def wait_seconds_with_window(seconds):
         time.sleep(0.03)
 
 
-def play_sound_with_volume(sound):
-    """
-    pygameの音量上限を超える分は、同じ音を重ねて再生する
-    """
-    full_layers = max(1, int(AUDIO_VOLUME_MULTIPLIER))
-    partial_volume = AUDIO_VOLUME_MULTIPLIER - full_layers
+def play_movie_with_cv2(movie_path):
+    video = cv2.VideoCapture(str(movie_path))
 
-    for _ in range(full_layers):
-        sound.play()
+    if not video.isOpened():
+        print(f"動画を開けません: {movie_path}")
+        return
 
-    if partial_volume > 0:
-        channel = sound.play()
-        if channel is not None:
-            channel.set_volume(partial_volume)
+    fps = video.get(cv2.CAP_PROP_FPS)
+    delay_ms = int(1000 / fps) if fps and fps > 0 else 33
+
+    while True:
+        ret, frame = video.read()
+
+        if not ret:
+            break
+
+        cv2.imshow("Movie", frame)
+        root.update()
+
+        if cv2.waitKey(delay_ms) & 0xFF == ord("q"):
+            break
+
+    video.release()
+    cv2.destroyWindow("Movie")
+
+
+def play_movie(movie_path):
+    print(f"動画再生: {movie_path.name}")
+
+    ffplay_path = shutil.which("ffplay")
+
+    if ffplay_path is None:
+        print("ffplayが見つからないため、映像のみ再生します")
+        play_movie_with_cv2(movie_path)
+        return
+
+    subprocess.run(
+        [
+            ffplay_path,
+            "-autoexit",
+            "-loglevel",
+            "quiet",
+            "-window_title",
+            movie_path.name,
+            str(movie_path),
+        ],
+        check=False,
+    )
 
 
 def apply_camera_settings(camera):
@@ -283,7 +319,6 @@ cap = open_preferred_camera()
 if cap is None:
     print("使用できるカメラが見つかりません")
     root.destroy()
-    pygame.mixer.quit()
     raise SystemExit(1)
 
 actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
@@ -307,73 +342,6 @@ last_motion_time = 0
 
 # True のときだけ検知イベントを発火できる
 armed = True
-
-
-def play_bell_and_voice(sound, label):
-    """
-    ベルと指定音声を同時に鳴らす
-    """
-    print(f"ベル + 音声を同時再生: {label}")
-
-    play_sound_with_volume(bell_sound)
-    play_sound_with_volume(sound)
-
-
-def play_bell_and_random_voice():
-    """
-    ベルとランダム音声を同時に鳴らす
-    """
-    if len(voice_sounds) == 0:
-        print("ランダム音声がないため、ベルのみ再生します")
-        play_sound_with_volume(bell_sound)
-        return
-
-    voice_name, voice_sound = random.choice(voice_sounds)
-    play_bell_and_voice(voice_sound, voice_name)
-
-
-def play_sequence():
-    """
-    検知時:
-    キャラ画像を表示
-
-    1回目: ベル + 固定『いらっしゃいませ』
-    3秒待つ
-
-    2回目: ベル + ランダム音声
-    3秒待つ
-
-    3回目: ベル + ランダム音声
-    3秒待つ
-
-    最後にキャラ画像を消す
-    """
-    show_character()
-
-    try:
-        # 1回目
-        print("1回目の再生")
-
-        if welcome_sound is not None:
-            play_bell_and_voice(welcome_sound, welcome_file_name)
-        else:
-            print("固定音声がないため、ベルのみ再生します")
-            play_sound_with_volume(bell_sound)
-
-        wait_seconds_with_window(3)
-
-        # 2回目
-        print("2回目の再生")
-        play_bell_and_random_voice()
-        wait_seconds_with_window(3)
-
-        # 3回目
-        print("3回目の再生")
-        play_bell_and_random_voice()
-        wait_seconds_with_window(3)
-
-    finally:
-        hide_character()
 
 
 try:
@@ -467,4 +435,3 @@ finally:
     character_window.destroy()
     root.destroy()
     cv2.destroyAllWindows()
-    pygame.mixer.quit()
